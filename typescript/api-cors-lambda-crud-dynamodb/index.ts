@@ -1,9 +1,19 @@
-import { IResource, LambdaIntegration, MockIntegration, PassthroughBehavior, RestApi } from '@aws-cdk/aws-apigateway';
+import {
+  AuthorizationType,
+  IResource,
+  LambdaIntegration,
+  MockIntegration,
+  PassthroughBehavior,
+  RestApi,
+  TokenAuthorizer
+} from '@aws-cdk/aws-apigateway';
 import { AttributeType, Table } from '@aws-cdk/aws-dynamodb';
 import { Runtime } from '@aws-cdk/aws-lambda';
-import { App, Stack, RemovalPolicy } from '@aws-cdk/core';
+import { App, Duration, RemovalPolicy, Stack } from '@aws-cdk/core';
 import { NodejsFunction, NodejsFunctionProps } from '@aws-cdk/aws-lambda-nodejs';
 import { join } from 'path'
+import { MethodOptions } from "@aws-cdk/aws-apigateway/lib/method";
+import { RetentionDays } from "@aws-cdk/aws-logs";
 
 export class ApiLambdaCrudDynamoDBStack extends Stack {
   constructor(app: App, id: string) {
@@ -36,9 +46,17 @@ export class ApiLambdaCrudDynamoDBStack extends Stack {
         TABLE_NAME: dynamoTable.tableName,
       },
       runtime: Runtime.NODEJS_14_X,
+      /**
+       *  The default log retention setting is RetentionDays.INFINITE
+       */
+      logRetention: RetentionDays.ONE_WEEK,
     }
 
     // Create a Lambda function for each of the CRUD operations
+    const authorizerLambda = new NodejsFunction(this, 'authorizerFunction', {
+      entry: join(__dirname, 'lambdas', 'authorizer.ts'),
+      ...nodeJsFunctionProps,
+    });
     const getOneLambda = new NodejsFunction(this, 'getOneItemFunction', {
       entry: join(__dirname, 'lambdas', 'get-one.ts'),
       ...nodeJsFunctionProps,
@@ -60,6 +78,12 @@ export class ApiLambdaCrudDynamoDBStack extends Stack {
       ...nodeJsFunctionProps,
     });
 
+    // Custom authorizer
+    const rakenApiCustomAuthorizer = new TokenAuthorizer(this, 'rakenApiCustomAuthorizer', {
+      handler: authorizerLambda,
+      resultsCacheTtl: Duration.millis(5_000),
+    });
+
     // Grant the Lambda function read access to the DynamoDB table
     dynamoTable.grantReadWriteData(getAllLambda);
     dynamoTable.grantReadWriteData(getOneLambda);
@@ -74,21 +98,30 @@ export class ApiLambdaCrudDynamoDBStack extends Stack {
     const updateOneIntegration = new LambdaIntegration(updateOneLambda);
     const deleteOneIntegration = new LambdaIntegration(deleteOneLambda);
 
-
     // Create an API Gateway resource for each of the CRUD operations
     const api = new RestApi(this, 'itemsApi', {
-      restApiName: 'Items Service'
+      restApiName: 'Items Service',
+      description: 'Items Service Sample',
+      deployOptions: {
+        stageName: "dev",
+      }
     });
 
+    // Method option
+    const methodOptions: MethodOptions = {
+      authorizationType: AuthorizationType.CUSTOM,
+      authorizer: rakenApiCustomAuthorizer,
+    };
+
     const items = api.root.addResource('items');
-    items.addMethod('GET', getAllIntegration);
-    items.addMethod('POST', createOneIntegration);
+    items.addMethod('GET', getAllIntegration, methodOptions);
+    items.addMethod('POST', createOneIntegration, methodOptions);
     addCorsOptions(items);
 
     const singleItem = items.addResource('{id}');
-    singleItem.addMethod('GET', getOneIntegration);
-    singleItem.addMethod('PATCH', updateOneIntegration);
-    singleItem.addMethod('DELETE', deleteOneIntegration);
+    singleItem.addMethod('GET', getOneIntegration, methodOptions);
+    singleItem.addMethod('PATCH', updateOneIntegration, methodOptions);
+    singleItem.addMethod('DELETE', deleteOneIntegration, methodOptions);
     addCorsOptions(singleItem);
   }
 }
